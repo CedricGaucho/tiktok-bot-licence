@@ -1,18 +1,27 @@
-import requests
 import os
+import requests
 import hashlib
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler
 
-# Variables d'environnement (définies sur Railway)
+# Variables d'environnement
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")  # token admin pour l'API
-ADMIN_ID = int(os.environ.get("ADMIN_ID"))   # votre ID Telegram
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 SERVER_URL = "https://cgaucho.pythonanywhere.com"
 
-# États pour la conversation
-UNIQUE_ID_NAME, UNIQUE_ID_API_ID, UNIQUE_ID_API_HASH, UNIQUE_ID_EXPIRY = range(4)
-RENEW_ID, RENEW_DAYS = range(4, 6)
+# États de la conversation
+(
+    UNIQUE_ID_NAME,
+    UNIQUE_ID_API_ID,
+    UNIQUE_ID_API_HASH,
+    UNIQUE_ID_DAYS,
+    RENEW_ID,
+    RENEW_DAYS,
+    DETAIL_ID,
+) = range(7)
+
+# ... le reste du code
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Menu principal avec boutons"""
