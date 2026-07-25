@@ -3,15 +3,14 @@ import requests
 import hashlib
 import json
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
     filters,
     ConversationHandler,
-    ContextTypes,          # <-- IMPORT AJOUTÉ
+    ContextTypes,
 )
 
 # === CONFIGURATION ===
@@ -20,7 +19,7 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 SERVER_URL = "https://cgaucho.pythonanywhere.com"
 
-# États de la conversation (pour la création d'un ID unique)
+# États de la conversation
 (
     UNIQUE_ID_NAME,
     UNIQUE_ID_API_ID,
@@ -33,55 +32,47 @@ SERVER_URL = "https://cgaucho.pythonanywhere.com"
 
 # === COMMANDES ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche le menu principal avec des boutons."""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Accès réservé à l'administrateur.")
         return
 
     keyboard = [
-        [InlineKeyboardButton("➕ Créer un ID unique", callback_data="create_unique")],
-        [InlineKeyboardButton("🔄 Renouveler un abonnement", callback_data="renew")],
-        [InlineKeyboardButton("📋 Liste des utilisateurs", callback_data="list_users")],
-        [InlineKeyboardButton("🔍 Détails d'un utilisateur", callback_data="detail_user")],
-        [InlineKeyboardButton("📊 Statistiques", callback_data="stats")],
+        ["➕ Créer un ID unique"],
+        ["🔄 Renouveler un abonnement"],
+        ["📋 Liste des utilisateurs"],
+        ["🔍 Détails d'un utilisateur"],
+        ["📊 Statistiques"]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
     await update.message.reply_text(
         "👋 **Dashboard Admin**\nChoisissez une action :",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
-# === GESTION DES BOUTONS (callback) ===
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gère les clics sur les boutons du menu."""
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data == "create_unique":
-        await query.edit_message_text("Entrez le **nom Telegram** de l'utilisateur :")
+# === GESTION DES MENUS (Réponses aux boutons) ===
+async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "➕ Créer un ID unique":
+        await update.message.reply_text("Entrez le **nom Telegram** de l'utilisateur :")
         return UNIQUE_ID_NAME
-
-    elif data == "renew":
-        await query.edit_message_text("Entrez l'**ID unique** ou l'**ID Telegram** de l'utilisateur à renouveler :")
+    elif text == "🔄 Renouveler un abonnement":
+        await update.message.reply_text("Entrez l'**ID unique** ou l'**ID Telegram** :")
         return RENEW_ID
-
-    elif data == "list_users":
-        await list_users(query)
+    elif text == "📋 Liste des utilisateurs":
+        await list_users(update)
         return ConversationHandler.END
-
-    elif data == "detail_user":
-        await query.edit_message_text("Entrez l'**ID unique** ou l'**ID Telegram** de l'utilisateur :")
+    elif text == "🔍 Détails d'un utilisateur":
+        await update.message.reply_text("Entrez l'**ID unique** ou l'**ID Telegram** :")
         return DETAIL_ID
-
-    elif data == "stats":
-        await stats(query)
+    elif text == "📊 Statistiques":
+        await stats(update)
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("Commande inconnue.")
         return ConversationHandler.END
 
-    return ConversationHandler.END
-
-# === FONCTIONS POUR LES ÉTAPES DE CONVERSATION ===
+# === ÉTAPES DE CRÉATION ===
 async def create_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['name'] = update.message.text
     await update.message.reply_text("Entrez l'**API ID** (nombre) :")
@@ -110,14 +101,12 @@ async def create_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Entrez un nombre de jours valide (positif) :")
         return UNIQUE_ID_DAYS
 
-    # Génération de l'ID unique
     name = context.user_data['name']
     api_id = context.user_data['api_id']
     api_hash = context.user_data['api_hash']
     raw = f"{name}{api_id}{api_hash}"
     unique_id = hashlib.sha256(raw.encode()).hexdigest()[:16]
 
-    # Appel à l'API PythonAnywhere pour créer l'utilisateur
     payload = {
         "admin_token": ADMIN_TOKEN,
         "unique_id": unique_id,
@@ -130,14 +119,14 @@ async def create_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resp = requests.post(f"{SERVER_URL}/create_user", json=payload, timeout=10)
         if resp.status_code == 200:
             await update.message.reply_text(
-                f"✅ **Utilisateur créé avec succès !**\n"
+                f"✅ **Utilisateur créé !**\n"
                 f"ID unique : `{unique_id}`\n"
                 f"Nom : {name}\n"
                 f"Jours : {days}\n"
-                f"Expiration : {datetime.now().strftime('%d/%m/%Y')}"
+                f"Expiration : {datetime.fromtimestamp(resp.json().get('expires_at')).strftime('%d/%m/%Y')}"
             )
         else:
-            await update.message.reply_text(f"❌ Erreur serveur : {resp.text}")
+            await update.message.reply_text(f"❌ Erreur serveur : {resp.text[:200]}")
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur de connexion : {e}")
 
@@ -168,7 +157,7 @@ async def renew_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if resp.status_code == 200:
             await update.message.reply_text(f"✅ Abonnement prolongé de {days} jours.")
         else:
-            await update.message.reply_text(f"❌ Erreur : {resp.text}")
+            await update.message.reply_text(f"❌ Erreur : {resp.text[:200]}")
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur de connexion : {e}")
 
@@ -182,24 +171,23 @@ async def detail_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if resp.status_code == 200:
             data = resp.json()
             msg = (
-                f"🔍 **Détails de l'utilisateur**\n"
+                f"🔍 **Détails**\n"
                 f"ID unique : `{data.get('unique_id')}`\n"
                 f"Nom : {data.get('name')}\n"
                 f"API ID : {data.get('api_id')}\n"
-                f"API Hash : {data.get('api_hash')[:10]}...\n"
-                f"Expiration : {datetime.fromtimestamp(data.get('expires_at')).strftime('%d/%m/%Y')}\n"
-                f"Fingerprint actif : {data.get('active_fingerprint', 'Aucun')[:8]}..."
+                f"API Hash : {data.get('api_hash', '')[:10]}...\n"
+                f"Expiration : {datetime.fromtimestamp(data.get('expires_at')).strftime('%d/%m/%Y')}"
             )
             await update.message.reply_text(msg, parse_mode="Markdown")
         else:
-            await update.message.reply_text(f"❌ {resp.text}")
+            await update.message.reply_text(f"❌ {resp.text[:200]}")
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur de connexion : {e}")
 
     return ConversationHandler.END
 
-# === FONCTIONS D'AFFICHAGE ===
-async def list_users(query):
+# === FONCTIONS D'AFFICHAGE (listes et stats) ===
+async def list_users(update: Update):
     payload = {"admin_token": ADMIN_TOKEN}
     try:
         resp = requests.get(f"{SERVER_URL}/list_users", params=payload, timeout=10)
@@ -207,19 +195,19 @@ async def list_users(query):
             data = resp.json()
             users = data.get('users', [])
             if not users:
-                await query.edit_message_text("📭 Aucun utilisateur enregistré.")
+                await update.message.reply_text("📭 Aucun utilisateur enregistré.")
                 return
             msg = "📋 **Liste des utilisateurs :**\n\n"
             for u in users:
                 status = "✅ Actif" if u.get('active') else "❌ Expiré"
                 msg += f"• `{u['unique_id']}` - {u['name']} - {status}\n"
-            await query.edit_message_text(msg, parse_mode="Markdown")
+            await update.message.reply_text(msg, parse_mode="Markdown")
         else:
-            await query.edit_message_text(f"❌ Erreur serveur : {resp.text}")
+            await update.message.reply_text(f"❌ Erreur serveur : {resp.text[:200]}")
     except Exception as e:
-        await query.edit_message_text(f"❌ Erreur de connexion : {e}")
+        await update.message.reply_text(f"❌ Erreur de connexion : {e}")
 
-async def stats(query):
+async def stats(update: Update):
     payload = {"admin_token": ADMIN_TOKEN}
     try:
         resp = requests.get(f"{SERVER_URL}/stats", params=payload, timeout=10)
@@ -227,20 +215,20 @@ async def stats(query):
             data = resp.json()
             msg = (
                 f"📊 **Statistiques**\n"
-                f"Total utilisateurs : {data.get('total')}\n"
+                f"Total : {data.get('total')}\n"
                 f"Actifs : {data.get('active')}\n"
                 f"Expirés : {data.get('expired')}"
             )
-            await query.edit_message_text(msg, parse_mode="Markdown")
+            await update.message.reply_text(msg, parse_mode="Markdown")
         else:
-            await query.edit_message_text(f"❌ Erreur serveur : {resp.text}")
+            await update.message.reply_text(f"❌ Erreur serveur : {resp.text[:200]}")
     except Exception as e:
-        await query.edit_message_text(f"❌ Erreur de connexion : {e}")
+        await update.message.reply_text(f"❌ Erreur de connexion : {e}")
 
 # === CONVERSATION HANDLER ===
 def get_conversation_handler():
     conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="^(create_unique|renew|detail_user)$")],
+        entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu)],
         states={
             UNIQUE_ID_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_name)],
             UNIQUE_ID_API_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_api_id)],
@@ -259,7 +247,6 @@ def get_conversation_handler():
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler, pattern="^(list_users|stats)$"))
     app.add_handler(get_conversation_handler())
     print("Bot démarré avec succès !")
     app.run_polling()
