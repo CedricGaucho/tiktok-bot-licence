@@ -1,174 +1,243 @@
 import requests
 import os
-import json
 import hashlib
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler
 
-# Récupération des variables d'environnement
+# Variables d'environnement (définies sur Railway)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID"))
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")  # token admin pour l'API
+ADMIN_ID = int(os.environ.get("ADMIN_ID"))   # votre ID Telegram
 SERVER_URL = "https://cgaucho.pythonanywhere.com"
 
-# Fonction pour générer un unique_id à partir de api_id, api_hash et nom_telegram
-def generate_unique_id(api_id, api_hash, telegram_name):
-    data = f"{api_id}|{api_hash}|{telegram_name}"
-    return hashlib.sha256(data.encode()).hexdigest()
+# États pour la conversation
+UNIQUE_ID_NAME, UNIQUE_ID_API_ID, UNIQUE_ID_API_HASH, UNIQUE_ID_EXPIRY = range(4)
+RENEW_ID, RENEW_DAYS = range(4, 6)
 
-# Menu principal
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menu principal avec boutons"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Accès réservé à l'administrateur.")
+        return
+
     keyboard = [
-        [InlineKeyboardButton("📊 Voir mon abonnement", callback_data="status")],
-        [InlineKeyboardButton("🔄 Renouveler mon abonnement", callback_data="renew")],
-        [InlineKeyboardButton("⏳ Prolonger un abonnement (admin)", callback_data="admin_renew")],
-        [InlineKeyboardButton("🆕 Créer un ID unique", callback_data="create_id")]
+        [InlineKeyboardButton("📋 Créer un ID unique", callback_data="create")],
+        [InlineKeyboardButton("🔄 Renouveler un abonnement", callback_data="renew")],
+        [InlineKeyboardButton("👥 Liste des utilisateurs", callback_data="list")],
+        [InlineKeyboardButton("🔍 Détails d'un utilisateur", callback_data="detail")],
+        [InlineKeyboardButton("📊 Statistiques", callback_data="stats")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "👋 Bienvenue ! Choisissez une option :",
-        reply_markup=reply_markup
-    )
+    await update.message.reply_text("👋 Admin Dashboard\nChoisissez une action :", reply_markup=reply_markup)
 
-# Gestionnaire de callback pour les boutons
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gère les clics sur les boutons"""
     query = update.callback_query
     await query.answer()
 
-    user_id = update.effective_user.id
-    data = query.data
+    if query.data == "create":
+        await query.edit_message_text("Entrez le nom Telegram de l'utilisateur (ex: @jean) :")
+        context.user_data['action'] = 'create'
+        return UNIQUE_ID_NAME
 
-    if data == "status":
-        # Voir abonnement
-        resp = requests.get(f"{SERVER_URL}/get_subscription?telegram_id={user_id}")
+    elif query.data == "renew":
+        await query.edit_message_text("Entrez l'ID unique ou l'ID Telegram de l'utilisateur :")
+        context.user_data['action'] = 'renew'
+        return RENEW_ID
+
+    elif query.data == "list":
+        await query.edit_message_text("Liste des utilisateurs en cours de chargement...")
+        # Appel API pour récupérer la liste
+        resp = requests.get(f"{SERVER_URL}/list_users?admin_token={ADMIN_TOKEN}")
         if resp.status_code == 200:
-            data_resp = resp.json()
-            if data_resp.get('status') == 'active':
-                await query.edit_message_text(f"✅ Abonnement actif. Jours restants : {data_resp['days_left']}")
+            data = resp.json()
+            if data:
+                text = "📋 *Liste des utilisateurs :*\n\n"
+                for user in data:
+                    status = "✅ Actif" if user['expires_at'] > int(time.time()) else "❌ Expiré"
+                    text += f"▪️ *{user['unique_id']}* ({user['telegram_id']})\n"
+                    text += f"   Expire: {user['expires_at']} | {status}\n\n"
+                # Tronquer si trop long
+                if len(text) > 4000:
+                    text = text[:4000] + "..."
+                await query.edit_message_text(text, parse_mode='Markdown')
             else:
-                await query.edit_message_text("❌ Abonnement expiré.")
-        elif resp.status_code == 404:
-            await query.edit_message_text("❌ Aucun abonnement trouvé pour votre compte.")
+                await query.edit_message_text("Aucun utilisateur enregistré.")
         else:
-            await query.edit_message_text("❌ Erreur lors de la vérification.")
+            await query.edit_message_text("❌ Erreur lors de la récupération de la liste.")
+        return ConversationHandler.END
 
-    elif data == "renew":
-        # Renouveler son propre abonnement (ex: ajouter 7 jours par défaut, ou demander un nombre)
-        # Ici on va demander combien de jours via une question
-        context.user_data['renew_action'] = 'ask_days'
-        await query.edit_message_text("Combien de jours souhaitez-vous ajouter ? (entrez un nombre)")
+    elif query.data == "detail":
+        await query.edit_message_text("Entrez l'ID unique ou l'ID Telegram de l'utilisateur :")
+        context.user_data['action'] = 'detail'
+        return RENEW_ID  # on réutilise l'état
 
-    elif data == "admin_renew":
-        # Réservé à l'admin : prolonger un autre utilisateur
-        if user_id != ADMIN_ID:
-            await query.edit_message_text("⛔ Cette commande est réservée à l'administrateur.")
-            return
-        # On demande l'ID et les jours
-        context.user_data['admin_renew_action'] = 'ask_telegram_id'
-        await query.edit_message_text("Entrez l'ID Telegram de l'utilisateur à prolonger :")
+    elif query.data == "stats":
+        # Statistiques rapides
+        resp = requests.get(f"{SERVER_URL}/stats?admin_token={ADMIN_TOKEN}")
+        if resp.status_code == 200:
+            data = resp.json()
+            text = f"📊 *Statistiques*\n\n"
+            text += f"Total utilisateurs : {data.get('total', 0)}\n"
+            text += f"Actifs : {data.get('active', 0)}\n"
+            text += f"Expirés : {data.get('expired', 0)}"
+            await query.edit_message_text(text, parse_mode='Markdown')
+        else:
+            await query.edit_message_text("❌ Erreur lors des statistiques.")
+        return ConversationHandler.END
 
-    elif data == "create_id":
-        # Générer un ID unique à partir de api_id, api_hash, nom Telegram
-        context.user_data['create_id_action'] = 'ask_api_id'
-        await query.edit_message_text("Entrez votre API ID :")
+async def create_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['name'] = update.message.text.strip()
+    await update.message.reply_text("Entrez l'API ID de l'utilisateur :")
+    return UNIQUE_ID_API_ID
 
-# Gestion des messages texte (pour les réponses aux questions)
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    user_id = update.effective_user.id
+async def create_api_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        context.user_data['api_id'] = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ L'API ID doit être un nombre. Réessayez :")
+        return UNIQUE_ID_API_ID
+    await update.message.reply_text("Entrez l'API Hash de l'utilisateur :")
+    return UNIQUE_ID_API_HASH
 
-    if 'renew_action' in context.user_data:
-        if context.user_data['renew_action'] == 'ask_days':
-            try:
-                days = int(text)
-                if days <= 0:
-                    raise ValueError
-                # Appel à l'API pour prolonger l'abonnement de l'utilisateur courant
-                payload = {
-                    "admin_token": ADMIN_TOKEN,
-                    "telegram_id": user_id,
-                    "days": days
-                }
-                resp = requests.post(f"{SERVER_URL}/renew_subscription", json=payload)
-                if resp.status_code == 200:
-                    await update.message.reply_text(f"✅ Abonnement prolongé de {days} jours.")
-                else:
-                    await update.message.reply_text("❌ Erreur lors du renouvellement.")
-                context.user_data.pop('renew_action', None)
-            except ValueError:
-                await update.message.reply_text("❌ Veuillez entrer un nombre valide.")
-        return
+async def create_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['api_hash'] = update.message.text.strip()
+    await update.message.reply_text("Entrez le nombre de jours d'abonnement (ex: 30) :")
+    return UNIQUE_ID_EXPIRY
 
-    if 'admin_renew_action' in context.user_data:
-        if context.user_data['admin_renew_action'] == 'ask_telegram_id':
-            try:
-                target_id = int(text)
-                context.user_data['admin_renew_target'] = target_id
-                context.user_data['admin_renew_action'] = 'ask_days_admin'
-                await update.message.reply_text("Combien de jours à ajouter ?")
-            except ValueError:
-                await update.message.reply_text("❌ ID invalide, veuillez entrer un nombre.")
-        elif context.user_data['admin_renew_action'] == 'ask_days_admin':
-            try:
-                days = int(text)
-                if days <= 0:
-                    raise ValueError
-                target_id = context.user_data['admin_renew_target']
-                payload = {
-                    "admin_token": ADMIN_TOKEN,
-                    "telegram_id": target_id,
-                    "days": days
-                }
-                resp = requests.post(f"{SERVER_URL}/renew_subscription", json=payload)
-                if resp.status_code == 200:
-                    await update.message.reply_text(f"✅ Abonnement de l'utilisateur {target_id} prolongé de {days} jours.")
-                else:
-                    await update.message.reply_text("❌ Erreur lors du renouvellement.")
-                context.user_data.pop('admin_renew_action', None)
-                context.user_data.pop('admin_renew_target', None)
-            except ValueError:
-                await update.message.reply_text("❌ Veuillez entrer un nombre valide.")
-        return
+async def create_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        days = int(update.message.text.strip())
+        if days <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Entrez un nombre de jours valide (ex: 30) :")
+        return UNIQUE_ID_EXPIRY
 
-    if 'create_id_action' in context.user_data:
-        if context.user_data['create_id_action'] == 'ask_api_id':
-            try:
-                api_id = int(text)
-                context.user_data['create_api_id'] = api_id
-                context.user_data['create_id_action'] = 'ask_api_hash'
-                await update.message.reply_text("Entrez votre API HASH :")
-            except ValueError:
-                await update.message.reply_text("❌ API ID doit être un nombre.")
-        elif context.user_data['create_id_action'] == 'ask_api_hash':
-            api_hash = text.strip()
-            context.user_data['create_api_hash'] = api_hash
-            context.user_data['create_id_action'] = 'ask_telegram_name'
-            await update.message.reply_text("Entrez votre nom Telegram (sans @) :")
-        elif context.user_data['create_id_action'] == 'ask_telegram_name':
-            name = text.strip()
-            api_id = context.user_data['create_api_id']
-            api_hash = context.user_data['create_api_hash']
-            # Générer l'ID unique
-            unique_id = generate_unique_id(api_id, api_hash, name)
-            # Ici, on peut l'enregistrer dans la base de données ? Pas directement, on va plutôt le renvoyer à l'utilisateur.
-            await update.message.reply_text(f"✅ Votre ID unique est : `{unique_id}`\nGardez-le précieusement !")
-            # On peut aussi afficher un message pour le copier.
-            context.user_data.pop('create_id_action', None)
-            context.user_data.pop('create_api_id', None)
-            context.user_data.pop('create_api_hash', None)
+    name = context.user_data['name']
+    api_id = context.user_data['api_id']
+    api_hash = context.user_data['api_hash']
+
+    # Générer l'ID unique (hash SHA256 des 3 éléments)
+    raw = f"{name}{api_id}{api_hash}"
+    unique_id = hashlib.sha256(raw.encode()).hexdigest()[:16]  # on prend les 16 premiers caractères
+
+    # Appel API pour créer l'utilisateur
+    payload = {
+        "admin_token": ADMIN_TOKEN,
+        "unique_id": unique_id,
+        "telegram_id": None,  # on ne connaît pas encore le telegram_id, on peut le laisser nul
+        "days": days,
+        "name": name,
+        "api_id": api_id,
+        "api_hash": api_hash,
+    }
+    resp = requests.post(f"{SERVER_URL}/create_user", json=payload)
+    if resp.status_code == 200:
+        await update.message.reply_text(f"✅ Utilisateur créé avec succès !\nID unique : `{unique_id}`\nExpire dans {days} jours.", parse_mode='Markdown')
+    else:
+        await update.message.reply_text("❌ Erreur lors de la création de l'utilisateur.")
+    return ConversationHandler.END
+
+async def renew_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['identifier'] = update.message.text.strip()
+    await update.message.reply_text("Entrez le nombre de jours à ajouter :")
+    return RENEW_DAYS
+
+async def renew_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        days = int(update.message.text.strip())
+        if days <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Entrez un nombre de jours valide :")
+        return RENEW_DAYS
+
+    identifier = context.user_data['identifier']
+    payload = {
+        "admin_token": ADMIN_TOKEN,
+        "identifier": identifier,
+        "days": days
+    }
+    resp = requests.post(f"{SERVER_URL}/renew_user", json=payload)
+    if resp.status_code == 200:
+        data = resp.json()
+        await update.message.reply_text(f"✅ Abonnement prolongé de {days} jours.\nNouvelle expiration : {data['new_expires_at']}")
+    elif resp.status_code == 404:
+        await update.message.reply_text("❌ Utilisateur non trouvé.")
+    else:
+        await update.message.reply_text("❌ Erreur lors du renouvellement.")
+    return ConversationHandler.END
+
+async def detail_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    identifier = update.message.text.strip()
+    resp = requests.get(f"{SERVER_URL}/user_detail?admin_token={ADMIN_TOKEN}&identifier={identifier}")
+    if resp.status_code == 200:
+        data = resp.json()
+        text = f"📋 *Détails de l'utilisateur*\n\n"
+        text += f"▪️ ID unique : `{data.get('unique_id')}`\n"
+        text += f"▪️ Telegram ID : {data.get('telegram_id') or 'Non renseigné'}\n"
+        text += f"▪️ Nom : {data.get('name') or 'N/A'}\n"
+        text += f"▪️ API ID : {data.get('api_id') or 'N/A'}\n"
+        text += f"▪️ Expire le : {data.get('expires_at')}\n"
+        text += f"▪️ Statut : {'✅ Actif' if data.get('active') else '❌ Expiré'}\n"
+        text += f"▪️ Fingerprint actif : {data.get('active_fingerprint') or 'Aucun'}"
+        await update.message.reply_text(text, parse_mode='Markdown')
+    elif resp.status_code == 404:
+        await update.message.reply_text("❌ Utilisateur non trouvé.")
+    else:
+        await update.message.reply_text("❌ Erreur lors de la récupération des détails.")
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Opération annulée.")
+    return ConversationHandler.END
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+
+    # Conversation handler pour 'create'
+    create_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button_callback, pattern="^create$")],
+        states={
+            UNIQUE_ID_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_name)],
+            UNIQUE_ID_API_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_api_id)],
+            UNIQUE_ID_API_HASH: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_api_hash)],
+            UNIQUE_ID_EXPIRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_expiry)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    # Conversation handler pour 'renew'
+    renew_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button_callback, pattern="^renew$")],
+        states={
+            RENEW_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, renew_id)],
+            RENEW_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, renew_days)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    # Conversation handler pour 'detail'
+    detail_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button_callback, pattern="^detail$")],
+        states={
+            RENEW_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, detail_result)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    # Handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(CommandHandler("status", button_callback))  # au cas où
-    app.add_handler(CommandHandler("renew", button_callback))
-    app.add_handler(CommandHandler("admin_renew", button_callback))
-    app.add_handler(CommandHandler("create_id", button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Bot démarré...")
+    app.add_handler(CallbackQueryHandler(button_callback, pattern="^list$"))
+    app.add_handler(CallbackQueryHandler(button_callback, pattern="^stats$"))
+    app.add_handler(create_conv)
+    app.add_handler(renew_conv)
+    app.add_handler(detail_conv)
+
+    print("Bot admin démarré...")
     app.run_polling()
 
 if __name__ == "__main__":
-    from telegram.ext import MessageHandler, filters
+    import time
     main()
