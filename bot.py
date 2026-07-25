@@ -1,77 +1,94 @@
 import os
 import requests
 import re
+import time
 import random
 import string
-import time
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler, ContextTypes
 
 # === CONFIGURATION ===
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 SERVER_URL = "https://cgaucho.pythonanywhere.com"
-ITEMS_PER_PAGE = 5  # Nombre d'utilisateurs par page
 
 # États de la conversation
 (
     CREATE_NAME,
     CREATE_API_ID,
     CREATE_API_HASH,
-    CREATE_UNIQUE_ID,
     CREATE_DAYS,
     RENEW_ID,
     RENEW_DAYS,
     DETAIL_ID,
+    UNBLOCK_ID,
 ) = range(8)
 
-# === FONCTIONS UTILITAIRES ===
-def get_main_menu_keyboard():
+# === CLAVIERS ===
+def get_main_keyboard():
+    """Clavier principal affiché en bas."""
     keyboard = [
         ["➕ Créer un ID unique"],
         ["🔄 Renouveler un abonnement"],
         ["📋 Liste des utilisateurs"],
         ["🔍 Détails d'un utilisateur"],
-        ["📊 Statistiques"],
-        ["❌ Annuler / Retour"]
+        ["🔓 Débloquer un utilisateur"],
+        ["📊 Statistiques"]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-async def send_main_menu(update: Update, message: str = "👋 **Dashboard Admin**\nChoisissez une action :"):
-    await update.message.reply_text(
-        message,
-        reply_markup=get_main_menu_keyboard(),
-        parse_mode="Markdown"
-    )
+def get_cancel_keyboard():
+    """Clavier avec un seul bouton Annuler."""
+    return ReplyKeyboardMarkup([["❌ Annuler"]], resize_keyboard=True)
 
 # === COMMANDE /start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Accès réservé à l'administrateur.")
         return
-    await send_main_menu(update)
 
-# === GESTION DU MENU PRINCIPAL ===
+    # Nettoyer la conversation en cours
+    context.user_data.clear()
+
+    await update.message.reply_text(
+        "👋 **Dashboard Admin**\nChoisissez une action :",
+        reply_markup=get_main_keyboard(),
+        parse_mode="Markdown"
+    )
+
+# === ANNULER / RETOUR ===
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text(
+        "✅ Opération annulée.\nChoisissez une action :",
+        reply_markup=get_main_keyboard()
+    )
+    return ConversationHandler.END
+
+# === GESTION DES MENUS (boutons principaux) ===
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == "➕ Créer un ID unique":
-        await update.message.reply_text("Entrez le **nom** de l'utilisateur (sans espaces) :")
+        await update.message.reply_text("Entrez le **nom** de l'utilisateur (sans espaces) :", reply_markup=get_cancel_keyboard())
         return CREATE_NAME
     elif text == "🔄 Renouveler un abonnement":
-        await update.message.reply_text("Entrez l'**ID unique** ou l'**ID Telegram** :")
+        await update.message.reply_text("Entrez l'**ID unique** ou l'**ID Telegram** :", reply_markup=get_cancel_keyboard())
         return RENEW_ID
     elif text == "📋 Liste des utilisateurs":
-        await list_users(update, page=0)  # Page 0 = première page
-        return ConversationHandler.END  # On sort de la conversation, car on utilise des callbacks
+        await list_users_paginated(update, context, page=0)
+        return ConversationHandler.END
     elif text == "🔍 Détails d'un utilisateur":
-        await update.message.reply_text("Entrez l'**ID unique** :")
+        await update.message.reply_text("Entrez l'**ID unique** ou l'**ID Telegram** :", reply_markup=get_cancel_keyboard())
         return DETAIL_ID
+    elif text == "🔓 Débloquer un utilisateur":
+        await update.message.reply_text("Entrez l'**ID unique** ou l'**ID Telegram** à débloquer :", reply_markup=get_cancel_keyboard())
+        return UNBLOCK_ID
     elif text == "📊 Statistiques":
         await stats(update)
         return ConversationHandler.END
-    elif text == "❌ Annuler / Retour":
-        await send_main_menu(update, "✅ Retour au menu principal.")
+    elif text == "❌ Annuler":
+        await cancel(update, context)
         return ConversationHandler.END
     else:
         await update.message.reply_text("Commande inconnue. Utilisez les boutons.")
@@ -81,7 +98,7 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip()
     if " " in name:
-        await update.message.reply_text("❌ Le nom ne doit pas contenir d'espaces.")
+        await update.message.reply_text("❌ Le nom ne doit pas contenir d'espaces. Réessayez :")
         return CREATE_NAME
     context.user_data['name'] = name
     await update.message.reply_text("Entrez l'**API ID** (6 chiffres) :")
@@ -90,7 +107,7 @@ async def create_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_api_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if not text.isdigit() or len(text) != 6:
-        await update.message.reply_text("❌ L'API ID doit être un nombre de 6 chiffres.")
+        await update.message.reply_text("❌ L'API ID doit être un nombre de 6 chiffres. Réessayez :")
         return CREATE_API_ID
     context.user_data['api_id'] = int(text)
     await update.message.reply_text("Entrez l'**API Hash** (32 caractères alphanumériques) :")
@@ -99,10 +116,11 @@ async def create_api_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if len(text) != 32 or not text.isalnum():
-        await update.message.reply_text("❌ L'API Hash doit faire 32 caractères alphanumériques.")
+        await update.message.reply_text("❌ L'API Hash doit faire 32 caractères alphanumériques. Réessayez :")
         return CREATE_API_HASH
     context.user_data['api_hash'] = text
 
+    # Génération automatique de l'ID unique : Nom + 10 caractères aléatoires
     suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
     unique_id = context.user_data['name'] + suffix
     context.user_data['unique_id'] = unique_id
@@ -120,10 +138,12 @@ async def create_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if days < 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ Entrez un nombre entier >= 0.")
+        await update.message.reply_text("❌ Entrez un nombre entier >= 0. Réessayez :")
         return CREATE_DAYS
 
     context.user_data['days'] = days
+
+    # Appel API pour créer l'utilisateur
     payload = {
         "admin_token": ADMIN_TOKEN,
         "unique_id": context.user_data['unique_id'],
@@ -141,24 +161,20 @@ async def create_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"ID unique : `{data['unique_id']}`\n"
                 f"Nom : {context.user_data['name']}\n"
                 f"Jours : {days}\n"
-                f"Expiration : {time.strftime('%d/%m/%Y %H:%M', time.localtime(data['expires_at']))}"
+                f"Expiration : {time.strftime('%d/%m/%Y %H:%M', time.localtime(data['expires_at']))}",
+                reply_markup=get_main_keyboard()
             )
         else:
-            await update.message.reply_text(f"❌ Erreur serveur : {resp.text[:200]}")
+            await update.message.reply_text(f"❌ Erreur serveur : {resp.text[:200]}", reply_markup=get_main_keyboard())
     except Exception as e:
-        await update.message.reply_text(f"❌ Erreur de connexion : {e}")
+        await update.message.reply_text(f"❌ Erreur de connexion : {e}", reply_markup=get_main_keyboard())
 
-    # Retour au menu
-    await send_main_menu(update, "✅ Opération terminée.")
+    context.user_data.clear()
     return ConversationHandler.END
 
 # === RENOUVELLEMENT ===
 async def renew_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if text == "❌ Annuler / Retour":
-        await send_main_menu(update, "✅ Retour au menu principal.")
-        return ConversationHandler.END
-    context.user_data['renew_id'] = text
+    context.user_data['renew_id'] = update.message.text.strip()
     await update.message.reply_text("Entrez le **nombre de jours** à ajouter :")
     return RENEW_DAYS
 
@@ -169,7 +185,7 @@ async def renew_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if days <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ Entrez un nombre entier positif.")
+        await update.message.reply_text("❌ Entrez un nombre entier positif. Réessayez :")
         return RENEW_DAYS
 
     payload = {
@@ -180,129 +196,170 @@ async def renew_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         resp = requests.post(f"{SERVER_URL}/renew_user", json=payload, timeout=10)
         if resp.status_code == 200:
-            await update.message.reply_text(f"✅ Abonnement prolongé de {days} jours.")
+            await update.message.reply_text(f"✅ Abonnement prolongé de {days} jours.", reply_markup=get_main_keyboard())
         else:
-            await update.message.reply_text(f"❌ Erreur : {resp.text[:200]}")
+            await update.message.reply_text(f"❌ Erreur : {resp.text[:200]}", reply_markup=get_main_keyboard())
     except Exception as e:
-        await update.message.reply_text(f"❌ Erreur de connexion : {e}")
+        await update.message.reply_text(f"❌ Erreur de connexion : {e}", reply_markup=get_main_keyboard())
 
-    await send_main_menu(update, "✅ Opération terminée.")
+    context.user_data.clear()
     return ConversationHandler.END
 
-# === DÉTAIL D'UN UTILISATEUR (saisie manuelle) ===
+# === DÉTAILS D'UN UTILISATEUR ===
 async def detail_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if text == "❌ Annuler / Retour":
-        await send_main_menu(update, "✅ Retour au menu principal.")
-        return ConversationHandler.END
-    await show_user_detail(update, text)
-    await send_main_menu(update, "✅ Détails affichés.")
-    return ConversationHandler.END
-
-# === FONCTION AFFICHER LES DÉTAILS D'UN UTILISATEUR (réutilisable) ===
-async def show_user_detail(update: Update, identifier: str):
+    identifier = update.message.text.strip()
     payload = {"admin_token": ADMIN_TOKEN, "identifier": identifier}
     try:
         resp = requests.get(f"{SERVER_URL}/user_detail", params=payload, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            fingerprint = data.get('active_fingerprint', 'Aucun')
-            if fingerprint and fingerprint != 'None':
-                fingerprint = fingerprint[:8] + "..."
-            else:
-                fingerprint = "Aucun"
             msg = (
                 f"🔍 **Détails de l'utilisateur**\n"
-                f"🆔 ID unique : `{data.get('unique_id')}`\n"
-                f"👤 Nom : {data.get('name')}\n"
-                f"📱 API ID : {data.get('api_id')}\n"
-                f"🔑 API Hash : {data.get('api_hash', '')[:10]}...\n"
-                f"📅 Expiration : {time.strftime('%d/%m/%Y %H:%M', time.localtime(data.get('expires_at')))}\n"
-                f"📱 Fingerprint : {fingerprint}\n"
-                f"🕒 Dernière connexion : {time.strftime('%d/%m/%Y %H:%M', time.localtime(data.get('last_seen', 0))) if data.get('last_seen') else 'Jamais'}"
+                f"ID unique : `{data.get('unique_id')}`\n"
+                f"Nom : {data.get('name')}\n"
+                f"API ID : {data.get('api_id')}\n"
+                f"API Hash : {data.get('api_hash', '')[:10]}...\n"
+                f"Expiration : {time.strftime('%d/%m/%Y %H:%M', time.localtime(data.get('expires_at')))}\n"
+                f"Fingerprint : {data.get('active_fingerprint', 'Aucun')[:8] if data.get('active_fingerprint') else 'Aucun'}"
             )
-            await update.message.reply_text(msg, parse_mode="Markdown")
-        elif resp.status_code == 404:
-            await update.message.reply_text("❌ Utilisateur non trouvé.")
+            await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
         else:
-            await update.message.reply_text(f"❌ Erreur serveur : {resp.text[:200]}")
+            await update.message.reply_text(f"❌ {resp.text[:200]}", reply_markup=get_main_keyboard())
     except Exception as e:
-        await update.message.reply_text(f"❌ Erreur de connexion : {e}")
+        await update.message.reply_text(f"❌ Erreur de connexion : {e}", reply_markup=get_main_keyboard())
 
-# === LISTE DES UTILISATEURS (paginée) ===
-async def list_users(update: Update, page: int = 0):
-    payload = {"admin_token": ADMIN_TOKEN}
+    context.user_data.clear()
+    return ConversationHandler.END
+
+# === DÉBLOQUER UN UTILISATEUR ===
+async def unblock_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    identifier = update.message.text.strip()
+    payload = {
+        "admin_token": ADMIN_TOKEN,
+        "identifier": identifier
+    }
     try:
-        resp = requests.get(f"{SERVER_URL}/list_users", params=payload, timeout=10)
-        if resp.status_code != 200:
-            await update.message.reply_text(f"❌ Erreur serveur : {resp.text[:200]}")
-            return
-        data = resp.json()
-        users = data.get('users', [])
-        if not users:
-            await update.message.reply_text("📭 Aucun utilisateur enregistré.")
-            return
-
-        total = len(users)
-        start = page * ITEMS_PER_PAGE
-        end = min(start + ITEMS_PER_PAGE, total)
-        page_users = users[start:end]
-
-        # Construire le message
-        msg = f"📋 **Liste des utilisateurs** (page {page+1}/{ (total-1)//ITEMS_PER_PAGE + 1 })\n\n"
-        for u in page_users:
-            status = "✅" if u.get('active') else "❌"
-            msg += f"{status} `{u['unique_id']}` - {u['name']}\n"
-
-        # Boutons de pagination et de détail
-        keyboard = []
-        row = []
-        if page > 0:
-            row.append(InlineKeyboardButton("◀️ Précédent", callback_data=f"list_{page-1}"))
-        if end < total:
-            row.append(InlineKeyboardButton("Suivant ▶️", callback_data=f"list_{page+1}"))
-        if row:
-            keyboard.append(row)
-
-        # Ajouter des boutons pour chaque utilisateur de la page (pour voir les détails)
-        for u in page_users:
-            keyboard.append([InlineKeyboardButton(
-                f"🔍 {u['name']} ({u['unique_id']})",
-                callback_data=f"detail_{u['unique_id']}"
-            )])
-
-        # Bouton retour au menu
-        keyboard.append([InlineKeyboardButton("🏠 Retour au menu", callback_data="menu")])
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        if update.callback_query:
-            await update.callback_query.edit_message_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
-            await update.callback_query.answer()
+        resp = requests.post(f"{SERVER_URL}/unblock_user", json=payload, timeout=10)
+        if resp.status_code == 200:
+            await update.message.reply_text(f"✅ Utilisateur débloqué avec succès.", reply_markup=get_main_keyboard())
         else:
-            await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
-
+            await update.message.reply_text(f"❌ Erreur : {resp.text[:200]}", reply_markup=get_main_keyboard())
     except Exception as e:
-        await update.message.reply_text(f"❌ Erreur de connexion : {e}")
+        await update.message.reply_text(f"❌ Erreur de connexion : {e}", reply_markup=get_main_keyboard())
 
-# === GESTION DES CALLBACKS (pagination et détails) ===
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    return ConversationHandler.END
+
+# === LISTE PAGINÉE (avec InlineKeyboard) ===
+async def list_users_paginated(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
+    if 'users_list' not in context.user_data or context.user_data.get('page') != page:
+        # Charger la liste depuis le serveur
+        payload = {"admin_token": ADMIN_TOKEN}
+        try:
+            resp = requests.get(f"{SERVER_URL}/list_users", params=payload, timeout=10)
+            if resp.status_code != 200:
+                await update.message.reply_text(f"❌ Erreur serveur : {resp.text[:200]}", reply_markup=get_main_keyboard())
+                return
+            users = resp.json().get('users', [])
+            context.user_data['users_list'] = users
+            context.user_data['page'] = page
+        except Exception as e:
+            await update.message.reply_text(f"❌ Erreur de connexion : {e}", reply_markup=get_main_keyboard())
+            return
+    else:
+        users = context.user_data['users_list']
+
+    if not users:
+        await update.message.reply_text("📭 Aucun utilisateur enregistré.", reply_markup=get_main_keyboard())
+        return
+
+    page_size = 10
+    total_pages = (len(users) + page_size - 1) // page_size
+    if page < 0:
+        page = 0
+    if page >= total_pages:
+        page = total_pages - 1
+
+    start = page * page_size
+    end = min(start + page_size, len(users))
+    page_users = users[start:end]
+
+    # Construire le message
+    msg = f"📋 **Liste des utilisateurs (page {page+1}/{total_pages})**\n\n"
+    for u in page_users:
+        status = "✅ Actif" if u.get('active') else "❌ Expiré"
+        msg += f"• {u['name']} - `{u['unique_id']}` - {status}\n"
+
+    # Boutons de pagination et détails par utilisateur
+    keyboard = []
+    # Ajouter un bouton pour chaque utilisateur (nom)
+    for u in page_users:
+        # On utilise l'ID unique comme callback_data
+        keyboard.append([InlineKeyboardButton(u['name'], callback_data=f"detail_{u['unique_id']}")])
+
+    # Boutons de navigation
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("◀️ Précédent", callback_data=f"list_page_{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("▶️ Suivant", callback_data=f"list_page_{page+1}"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
+    # Bouton retour au menu (pour fermer la liste)
+    keyboard.append([InlineKeyboardButton("🏠 Menu principal", callback_data="back_to_menu")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Si c'est un callback, on édite le message, sinon on envoie un nouveau
+    if update.callback_query:
+        await update.callback_query.edit_message_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+        await update.callback_query.answer()
+    else:
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+
+# === GESTION DES CALLBACKS (pagination + détails) ===
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
+    await query.answer()
 
-    if data.startswith("list_"):
-        page = int(data.split("_")[1])
-        await list_users(update, page)
+    if data.startswith("list_page_"):
+        page = int(data.split("_")[2])
+        # Récupérer le message original pour le modifier (pas besoin de passer update.message)
+        await list_users_paginated(update, context, page=page)
     elif data.startswith("detail_"):
-        unique_id = data.split("_", 1)[1]
-        await show_user_detail(update, unique_id)
-        # Après affichage, on renvoie vers la liste
-        await list_users(update, 0)  # Retour à la première page
-    elif data == "menu":
-        await send_main_menu(update, "✅ Retour au menu principal.")
-        await query.message.delete()  # Supprime le message de la liste
-        await query.answer()
-    else:
-        await query.answer("Action inconnue.")
+        unique_id = data.split("_")[1]
+        # Afficher les détails
+        payload = {"admin_token": ADMIN_TOKEN, "identifier": unique_id}
+        try:
+            resp = requests.get(f"{SERVER_URL}/user_detail", params=payload, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                msg = (
+                    f"🔍 **Détails de l'utilisateur**\n"
+                    f"ID unique : `{data.get('unique_id')}`\n"
+                    f"Nom : {data.get('name')}\n"
+                    f"API ID : {data.get('api_id')}\n"
+                    f"API Hash : {data.get('api_hash', '')[:10]}...\n"
+                    f"Expiration : {time.strftime('%d/%m/%Y %H:%M', time.localtime(data.get('expires_at')))}\n"
+                    f"Fingerprint : {data.get('active_fingerprint', 'Aucun')[:8] if data.get('active_fingerprint') else 'Aucun'}"
+                )
+                # On envoie un nouveau message, on ne modifie pas la liste (on garde la liste ouverte)
+                await query.message.reply_text(msg, parse_mode="Markdown")
+            else:
+                await query.message.reply_text(f"❌ Erreur : {resp.text[:200]}")
+        except Exception as e:
+            await query.message.reply_text(f"❌ Erreur de connexion : {e}")
+    elif data == "back_to_menu":
+        await query.message.delete()
+        await query.message.reply_text(
+            "👋 **Dashboard Admin**\nChoisissez une action :",
+            reply_markup=get_main_keyboard(),
+            parse_mode="Markdown"
+        )
+        context.user_data.pop('users_list', None)
+        context.user_data.pop('page', None)
 
 # === STATISTIQUES ===
 async def stats(update: Update):
@@ -313,15 +370,15 @@ async def stats(update: Update):
             data = resp.json()
             msg = (
                 f"📊 **Statistiques**\n"
-                f"Total utilisateurs : {data.get('total')}\n"
-                f"✅ Actifs : {data.get('active')}\n"
-                f"❌ Expirés : {data.get('expired')}"
+                f"Total : {data.get('total')}\n"
+                f"Actifs : {data.get('active')}\n"
+                f"Expirés : {data.get('expired')}"
             )
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
         else:
-            await update.message.reply_text(f"❌ Erreur serveur : {resp.text[:200]}")
+            await update.message.reply_text(f"❌ Erreur serveur : {resp.text[:200]}", reply_markup=get_main_keyboard())
     except Exception as e:
-        await update.message.reply_text(f"❌ Erreur de connexion : {e}")
+        await update.message.reply_text(f"❌ Erreur de connexion : {e}", reply_markup=get_main_keyboard())
 
 # === CONVERSATION HANDLER ===
 def get_conversation_handler():
@@ -335,11 +392,9 @@ def get_conversation_handler():
             RENEW_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, renew_id)],
             RENEW_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, renew_days)],
             DETAIL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, detail_id)],
+            UNBLOCK_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, unblock_id)],
         },
-        fallbacks=[
-            CommandHandler("cancel", lambda u, c: u.message.reply_text("Annulé.")),
-            MessageHandler(filters.Regex("^❌ Annuler / Retour$"), lambda u, c: send_main_menu(u, "✅ Retour au menu principal."))
-        ],
+        fallbacks=[CommandHandler("cancel", cancel)],
         per_message=False,
     )
     return conv
@@ -348,8 +403,9 @@ def get_conversation_handler():
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CallbackQueryHandler(callback_handler, pattern="^(list_page_|detail_|back_to_menu)"))
     app.add_handler(get_conversation_handler())
-    app.add_handler(CallbackQueryHandler(button_callback))
     print("Bot démarré avec succès !")
     app.run_polling()
 
