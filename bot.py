@@ -1,17 +1,8 @@
 import os
 import requests
-import hashlib
-import json
-from datetime import datetime
+import re
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ConversationHandler,
-    ContextTypes,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes
 
 # === CONFIGURATION ===
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -21,16 +12,17 @@ SERVER_URL = "https://cgaucho.pythonanywhere.com"
 
 # États de la conversation
 (
-    UNIQUE_ID_NAME,
-    UNIQUE_ID_API_ID,
-    UNIQUE_ID_API_HASH,
-    UNIQUE_ID_DAYS,
+    CREATE_NAME,
+    CREATE_API_ID,
+    CREATE_API_HASH,
+    CREATE_UNIQUE_ID,
+    CREATE_DAYS,
     RENEW_ID,
     RENEW_DAYS,
     DETAIL_ID,
-) = range(7)
+) = range(8)
 
-# === COMMANDES ===
+# === COMMANDE /start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Accès réservé à l'administrateur.")
@@ -43,19 +35,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ["🔍 Détails d'un utilisateur"],
         ["📊 Statistiques"]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
         "👋 **Dashboard Admin**\nChoisissez une action :",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
-# === GESTION DES MENUS (Réponses aux boutons) ===
+# === GESTION DES MENUS (boutons) ===
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == "➕ Créer un ID unique":
-        await update.message.reply_text("Entrez le **nom Telegram** de l'utilisateur :")
-        return UNIQUE_ID_NAME
+        await update.message.reply_text("Entrez le **nom** de l'utilisateur (sans espaces) :")
+        return CREATE_NAME
     elif text == "🔄 Renouveler un abonnement":
         await update.message.reply_text("Entrez l'**ID unique** ou l'**ID Telegram** :")
         return RENEW_ID
@@ -72,58 +64,78 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Commande inconnue.")
         return ConversationHandler.END
 
-# === ÉTAPES DE CRÉATION ===
+# === ÉTAPE : Nom ===
 async def create_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['name'] = update.message.text
-    await update.message.reply_text("Entrez l'**API ID** (nombre) :")
-    return UNIQUE_ID_API_ID
+    name = update.message.text.strip()
+    if " " in name:
+        await update.message.reply_text("❌ Le nom ne doit pas contenir d'espaces.")
+        return CREATE_NAME
+    context.user_data['name'] = name
+    await update.message.reply_text("Entrez l'**API ID** (6 chiffres) :")
+    return CREATE_API_ID
 
+# === ÉTAPE : API ID ===
 async def create_api_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        context.user_data['api_id'] = int(update.message.text)
-    except ValueError:
-        await update.message.reply_text("❌ L'API ID doit être un nombre. Réessayez :")
-        return UNIQUE_ID_API_ID
-    await update.message.reply_text("Entrez l'**API Hash** :")
-    return UNIQUE_ID_API_HASH
+    text = update.message.text.strip()
+    if not text.isdigit() or len(text) != 6:
+        await update.message.reply_text("❌ L'API ID doit être un nombre de 6 chiffres.")
+        return CREATE_API_ID
+    context.user_data['api_id'] = int(text)
+    await update.message.reply_text("Entrez l'**API Hash** (32 caractères alphanumériques) :")
+    return CREATE_API_HASH
 
+# === ÉTAPE : API Hash ===
 async def create_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['api_hash'] = update.message.text
-    await update.message.reply_text("Entrez le **nombre de jours** d'abonnement (ex: 30) :")
-    return UNIQUE_ID_DAYS
+    text = update.message.text.strip()
+    if len(text) != 32 or not text.isalnum():
+        await update.message.reply_text("❌ L'API Hash doit faire 32 caractères alphanumériques.")
+        return CREATE_API_HASH
+    context.user_data['api_hash'] = text
 
+    # Génération automatique de l'ID unique : Nom + 10 caractères aléatoires
+    import random, string
+    suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+    unique_id = context.user_data['name'] + suffix
+    context.user_data['unique_id'] = unique_id
+
+    await update.message.reply_text(
+        f"✅ **ID unique généré** : `{unique_id}`\n"
+        "Entrez le **nombre de jours** d'abonnement (0 pour un essai de 8h) :"
+    )
+    return CREATE_DAYS
+
+# === ÉTAPE : Jours ===
 async def create_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
     try:
-        days = int(update.message.text)
-        if days <= 0:
+        days = int(text)
+        if days < 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ Entrez un nombre de jours valide (positif) :")
-        return UNIQUE_ID_DAYS
+        await update.message.reply_text("❌ Entrez un nombre entier >= 0.")
+        return CREATE_DAYS
 
-    name = context.user_data['name']
-    api_id = context.user_data['api_id']
-    api_hash = context.user_data['api_hash']
-    raw = f"{name}{api_id}{api_hash}"
-    unique_id = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    context.user_data['days'] = days
 
+    # Appel API pour créer l'utilisateur
     payload = {
         "admin_token": ADMIN_TOKEN,
-        "unique_id": unique_id,
-        "name": name,
-        "api_id": api_id,
-        "api_hash": api_hash,
+        "unique_id": context.user_data['unique_id'],
+        "name": context.user_data['name'],
+        "api_id": context.user_data['api_id'],
+        "api_hash": context.user_data['api_hash'],
         "days": days
     }
     try:
         resp = requests.post(f"{SERVER_URL}/create_user", json=payload, timeout=10)
         if resp.status_code == 200:
+            data = resp.json()
             await update.message.reply_text(
                 f"✅ **Utilisateur créé !**\n"
-                f"ID unique : `{unique_id}`\n"
-                f"Nom : {name}\n"
+                f"ID unique : `{data['unique_id']}`\n"
+                f"Nom : {context.user_data['name']}\n"
                 f"Jours : {days}\n"
-                f"Expiration : {datetime.fromtimestamp(resp.json().get('expires_at')).strftime('%d/%m/%Y')}"
+                f"Expiration : {time.strftime('%d/%m/%Y', time.localtime(data['expires_at']))}"
             )
         else:
             await update.message.reply_text(f"❌ Erreur serveur : {resp.text[:200]}")
@@ -132,24 +144,26 @@ async def create_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
+# === RENOUVELLEMENT : ID ===
 async def renew_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['renew_id'] = update.message.text
+    context.user_data['renew_id'] = update.message.text.strip()
     await update.message.reply_text("Entrez le **nombre de jours** à ajouter :")
     return RENEW_DAYS
 
+# === RENOUVELLEMENT : Jours ===
 async def renew_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
     try:
-        days = int(update.message.text)
+        days = int(text)
         if days <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ Entrez un nombre de jours valide :")
+        await update.message.reply_text("❌ Entrez un nombre entier positif.")
         return RENEW_DAYS
 
-    user_id = context.user_data['renew_id']
     payload = {
         "admin_token": ADMIN_TOKEN,
-        "identifier": user_id,
+        "identifier": context.user_data['renew_id'],
         "days": days
     }
     try:
@@ -163,9 +177,10 @@ async def renew_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
+# === DÉTAIL ===
 async def detail_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.text
-    payload = {"admin_token": ADMIN_TOKEN, "identifier": user_id}
+    identifier = update.message.text.strip()
+    payload = {"admin_token": ADMIN_TOKEN, "identifier": identifier}
     try:
         resp = requests.get(f"{SERVER_URL}/user_detail", params=payload, timeout=10)
         if resp.status_code == 200:
@@ -176,7 +191,8 @@ async def detail_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Nom : {data.get('name')}\n"
                 f"API ID : {data.get('api_id')}\n"
                 f"API Hash : {data.get('api_hash', '')[:10]}...\n"
-                f"Expiration : {datetime.fromtimestamp(data.get('expires_at')).strftime('%d/%m/%Y')}"
+                f"Expiration : {time.strftime('%d/%m/%Y', time.localtime(data.get('expires_at')))}\n"
+                f"Fingerprint : {data.get('active_fingerprint', 'Aucun')[:8]}..."
             )
             await update.message.reply_text(msg, parse_mode="Markdown")
         else:
@@ -186,7 +202,7 @@ async def detail_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
-# === FONCTIONS D'AFFICHAGE (listes et stats) ===
+# === LISTE ===
 async def list_users(update: Update):
     payload = {"admin_token": ADMIN_TOKEN}
     try:
@@ -195,9 +211,9 @@ async def list_users(update: Update):
             data = resp.json()
             users = data.get('users', [])
             if not users:
-                await update.message.reply_text("📭 Aucun utilisateur enregistré.")
+                await update.message.reply_text("📭 Aucun utilisateur.")
                 return
-            msg = "📋 **Liste des utilisateurs :**\n\n"
+            msg = "📋 **Liste des utilisateurs** :\n\n"
             for u in users:
                 status = "✅ Actif" if u.get('active') else "❌ Expiré"
                 msg += f"• `{u['unique_id']}` - {u['name']} - {status}\n"
@@ -207,6 +223,7 @@ async def list_users(update: Update):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur de connexion : {e}")
 
+# === STATISTIQUES ===
 async def stats(update: Update):
     payload = {"admin_token": ADMIN_TOKEN}
     try:
@@ -227,13 +244,13 @@ async def stats(update: Update):
 
 # === CONVERSATION HANDLER ===
 def get_conversation_handler():
-    conv_handler = ConversationHandler(
+    conv = ConversationHandler(
         entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu)],
         states={
-            UNIQUE_ID_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_name)],
-            UNIQUE_ID_API_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_api_id)],
-            UNIQUE_ID_API_HASH: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_api_hash)],
-            UNIQUE_ID_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_days)],
+            CREATE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_name)],
+            CREATE_API_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_api_id)],
+            CREATE_API_HASH: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_api_hash)],
+            CREATE_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_days)],
             RENEW_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, renew_id)],
             RENEW_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, renew_days)],
             DETAIL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, detail_id)],
@@ -241,9 +258,8 @@ def get_conversation_handler():
         fallbacks=[CommandHandler("cancel", lambda u, c: u.message.reply_text("Annulé."))],
         per_message=False,
     )
-    return conv_handler
+    return conv
 
-# === MAIN ===
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
