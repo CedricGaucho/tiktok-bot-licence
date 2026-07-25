@@ -48,9 +48,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Accès réservé à l'administrateur.")
         return
 
-    # Nettoyer la conversation en cours
     context.user_data.clear()
-
     await update.message.reply_text(
         "👋 **Dashboard Admin**\nChoisissez une action :",
         reply_markup=get_main_keyboard(),
@@ -65,6 +63,13 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_main_keyboard()
     )
     return ConversationHandler.END
+
+async def check_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Vérifie si le message est 'Annuler' et annule la conversation."""
+    if update.message.text == "❌ Annuler":
+        await cancel(update, context)
+        return True
+    return False
 
 # === GESTION DES MENUS (boutons principaux) ===
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -96,6 +101,8 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === CRÉATION D'UN UTILISATEUR ===
 async def create_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await check_cancel(update, context):
+        return ConversationHandler.END
     name = update.message.text.strip()
     if " " in name:
         await update.message.reply_text("❌ Le nom ne doit pas contenir d'espaces. Réessayez :")
@@ -105,6 +112,8 @@ async def create_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CREATE_API_ID
 
 async def create_api_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await check_cancel(update, context):
+        return ConversationHandler.END
     text = update.message.text.strip()
     if not text.isdigit() or len(text) != 6:
         await update.message.reply_text("❌ L'API ID doit être un nombre de 6 chiffres. Réessayez :")
@@ -114,6 +123,8 @@ async def create_api_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CREATE_API_HASH
 
 async def create_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await check_cancel(update, context):
+        return ConversationHandler.END
     text = update.message.text.strip()
     if len(text) != 32 or not text.isalnum():
         await update.message.reply_text("❌ L'API Hash doit faire 32 caractères alphanumériques. Réessayez :")
@@ -132,6 +143,8 @@ async def create_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CREATE_DAYS
 
 async def create_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await check_cancel(update, context):
+        return ConversationHandler.END
     text = update.message.text.strip()
     try:
         days = int(text)
@@ -174,11 +187,15 @@ async def create_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === RENOUVELLEMENT ===
 async def renew_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await check_cancel(update, context):
+        return ConversationHandler.END
     context.user_data['renew_id'] = update.message.text.strip()
     await update.message.reply_text("Entrez le **nombre de jours** à ajouter :")
     return RENEW_DAYS
 
 async def renew_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await check_cancel(update, context):
+        return ConversationHandler.END
     text = update.message.text.strip()
     try:
         days = int(text)
@@ -207,6 +224,8 @@ async def renew_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === DÉTAILS D'UN UTILISATEUR ===
 async def detail_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await check_cancel(update, context):
+        return ConversationHandler.END
     identifier = update.message.text.strip()
     payload = {"admin_token": ADMIN_TOKEN, "identifier": identifier}
     try:
@@ -233,6 +252,8 @@ async def detail_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === DÉBLOQUER UN UTILISATEUR ===
 async def unblock_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await check_cancel(update, context):
+        return ConversationHandler.END
     identifier = update.message.text.strip()
     payload = {
         "admin_token": ADMIN_TOKEN,
@@ -284,7 +305,6 @@ async def list_users_paginated(update: Update, context: ContextTypes.DEFAULT_TYP
     end = min(start + page_size, len(users))
     page_users = users[start:end]
 
-    # Construire le message
     msg = f"📋 **Liste des utilisateurs (page {page+1}/{total_pages})**\n\n"
     for u in page_users:
         status = "✅ Actif" if u.get('active') else "❌ Expiré"
@@ -292,12 +312,9 @@ async def list_users_paginated(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # Boutons de pagination et détails par utilisateur
     keyboard = []
-    # Ajouter un bouton pour chaque utilisateur (nom)
     for u in page_users:
-        # On utilise l'ID unique comme callback_data
         keyboard.append([InlineKeyboardButton(u['name'], callback_data=f"detail_{u['unique_id']}")])
 
-    # Boutons de navigation
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton("◀️ Précédent", callback_data=f"list_page_{page-1}"))
@@ -306,12 +323,10 @@ async def list_users_paginated(update: Update, context: ContextTypes.DEFAULT_TYP
     if nav_buttons:
         keyboard.append(nav_buttons)
 
-    # Bouton retour au menu (pour fermer la liste)
     keyboard.append([InlineKeyboardButton("🏠 Menu principal", callback_data="back_to_menu")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Si c'est un callback, on édite le message, sinon on envoie un nouveau
     if update.callback_query:
         await update.callback_query.edit_message_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
         await update.callback_query.answer()
@@ -326,11 +341,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("list_page_"):
         page = int(data.split("_")[2])
-        # Récupérer le message original pour le modifier (pas besoin de passer update.message)
         await list_users_paginated(update, context, page=page)
     elif data.startswith("detail_"):
         unique_id = data.split("_")[1]
-        # Afficher les détails
         payload = {"admin_token": ADMIN_TOKEN, "identifier": unique_id}
         try:
             resp = requests.get(f"{SERVER_URL}/user_detail", params=payload, timeout=10)
@@ -345,7 +358,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Expiration : {time.strftime('%d/%m/%Y %H:%M', time.localtime(data.get('expires_at')))}\n"
                     f"Fingerprint : {data.get('active_fingerprint', 'Aucun')[:8] if data.get('active_fingerprint') else 'Aucun'}"
                 )
-                # On envoie un nouveau message, on ne modifie pas la liste (on garde la liste ouverte)
                 await query.message.reply_text(msg, parse_mode="Markdown")
             else:
                 await query.message.reply_text(f"❌ Erreur : {resp.text[:200]}")
