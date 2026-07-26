@@ -108,15 +108,15 @@ async def create_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Le nom ne doit pas contenir d'espaces. Réessayez :")
         return CREATE_NAME
     context.user_data['name'] = name
-    await update.message.reply_text("Entrez l'**API ID** (6 chiffres) :")
+    await update.message.reply_text("Entrez l'**API ID** (8 chiffres) :")
     return CREATE_API_ID
 
 async def create_api_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await check_cancel(update, context):
         return ConversationHandler.END
     text = update.message.text.strip()
-    if not text.isdigit() or len(text) != 6:
-        await update.message.reply_text("❌ L'API ID doit être un nombre de 6 chiffres. Réessayez :")
+    if not text.isdigit() or len(text) != 8:
+        await update.message.reply_text("❌ L'API ID doit être un nombre de 8 chiffres. Réessayez :")
         return CREATE_API_ID
     context.user_data['api_id'] = int(text)
     await update.message.reply_text("Entrez l'**API Hash** (32 caractères alphanumériques) :")
